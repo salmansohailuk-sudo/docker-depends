@@ -1,5 +1,14 @@
 version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL DEVELOPMENT — uses a local MySQL container instead of RDS.
+# For production / RDS, remove the backend_database service and set the
+# DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD env vars in backend_app
+# to point at your RDS endpoint.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
+
   frontend_app:
     build:
       dockerfile: frontend.Dockerfile
@@ -9,24 +18,43 @@ services:
     depends_on:
       backend_app:
         condition: service_healthy
+
   backend_app:
     build:
       dockerfile: backend.Dockerfile
       context: backend/
     ports:
       - "8080:8080"
+    environment:
+      DB_HOST:     backend_database
+      DB_PORT:     "3306"
+      DB_NAME:     backend_db
+      DB_USER:     user
+      DB_PASSWORD: password
     depends_on:
       backend_database:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/ping" ]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
       interval: 5s
-      timeout: 2s
-      retries: 5
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   backend_database:
-    build:
-      dockerfile: database.Dockerfile
-      context: database/
+    image: mysql:8.4
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE:      backend_db
+      MYSQL_USER:          user
+      MYSQL_PASSWORD:      password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./database/1_init_db.sql:/docker-entrypoint-initdb.d/1_init_db.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uuser", "-ppassword"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s

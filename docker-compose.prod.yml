@@ -1,0 +1,36 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCTION docker-compose — pulls pre-built images from DockerHub.
+# Does NOT contain a local database service; expects an external RDS endpoint.
+# Copy this file to your deploy server as docker-compose.yml.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  frontend_app:
+    image: your-dockerhub-username/demo-frontend:latest   # ← set your image name
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      backend_app:
+        condition: service_healthy
+
+  backend_app:
+    image: your-dockerhub-username/demo-backend:latest    # ← set your image name
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      DB_HOST:     YOUR_RDS_ENDPOINT          # ← set your RDS endpoint
+      DB_PORT:     "3306"
+      DB_NAME:     backend_db
+      DB_USER:     user
+      DB_PASSWORD: YOUR_RDS_PASSWORD          # ← set your RDS password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
