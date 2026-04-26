@@ -1,40 +1,33 @@
-# Jenkins CI/CD Pipeline — Setup Guide
+# Jenkins CI/CD Setup Guide
 
-This guide walks you through setting up Jenkins to automatically build, push,
-and deploy the Docker Demo app every time you push to your Git repository.
-
----
-
-## What the Pipeline Does
+## What the pipeline does
 
 ```
-Git Push
-   │
-   ▼
-[1] Checkout     — pulls your source code
-[2] Test         — runs a Python lint check on app.py
-[3] Build        — builds backend and frontend Docker images
-[4] Push         — pushes images to DockerHub (tagged with build number + "latest")
-[5] Deploy       — SSHs into your server, pulls new images, restarts containers
+Git push
+  │
+  ├─ [1] Checkout   pulls latest code from Git
+  ├─ [2] Test       pyflakes lint check on app.py
+  ├─ [3] Build      docker build backend + frontend images from source
+  ├─ [4] Push       docker push both images to DockerHub (:<build#> and :latest)
+  └─ [5] Cleanup    docker image prune (keeps agent disk tidy)
 ```
+
+Images are built fresh from the repo on every run — nothing is pulled from DockerHub during the build.
 
 ---
 
 ## Prerequisites
 
-| What                      | Where to get it                                      |
-|---------------------------|------------------------------------------------------|
-| Jenkins server            | Your own server, EC2, or [jenkins.io](https://www.jenkins.io/doc/book/installing/) |
-| Docker + Docker Compose   | Installed on the Jenkins agent machine               |
-| DockerHub account         | [hub.docker.com](https://hub.docker.com)             |
-| Deploy server             | Any Linux VM / EC2 with Docker + Docker Compose      |
-| Git repository            | GitHub, GitLab, Bitbucket, etc.                      |
+- Jenkins server with Docker installed on the same machine (or agent)
+- A [DockerHub](https://hub.docker.com) account
+- Your project in a Git repository (GitHub, GitLab, Bitbucket, etc.)
 
 ---
 
 ## Step 1 — Install Jenkins
 
-### Option A — Docker (quickest)
+### Option A — Docker (quickest way to get started)
+
 ```bash
 docker run -d \
   --name jenkins \
@@ -43,180 +36,133 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   jenkins/jenkins:lts
 ```
-Mounting `/var/run/docker.sock` lets Jenkins run Docker commands on your host.
 
-Open [http://localhost:8888](http://localhost:8888), retrieve the initial admin password:
+> Mounting `/var/run/docker.sock` lets Jenkins run Docker commands on the host machine.
+
+Get the first-time admin password:
+
 ```bash
 docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
 ```
 
-### Option B — Linux server (apt)
+Open **http://localhost:8888**, paste the password, and follow the setup wizard.
+
+### Option B — Install directly on Ubuntu/Debian
+
 ```bash
 sudo apt update && sudo apt install -y openjdk-17-jdk
-curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee \
-  /usr/share/keyrings/jenkins-keyring.asc > /dev/null
-echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
-  https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
-  /etc/apt/sources.list.d/jenkins.list > /dev/null
+
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+  | sudo tee /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
+  https://pkg.jenkins.io/debian-stable binary/" \
+  | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+
 sudo apt update && sudo apt install -y jenkins
 sudo systemctl start jenkins
+
+# Add Jenkins to the docker group so it can run docker commands
+sudo usermod -aG docker jenkins
+sudo systemctl restart jenkins
 ```
 
 ---
 
-## Step 2 — Install Required Jenkins Plugins
+## Step 2 — Install Jenkins Plugins
 
 Go to **Manage Jenkins → Plugins → Available plugins** and install:
 
-- ✅ **Pipeline** (usually pre-installed)
-- ✅ **Git**
-- ✅ **Docker Pipeline**
-- ✅ **SSH Agent**
-- ✅ **Credentials Binding**
+| Plugin | Why |
+|---|---|
+| Pipeline | Reads the Jenkinsfile |
+| Git | Clones your repository |
+| Docker Pipeline | `docker build` / `docker push` steps |
+| SSH Agent | SSH into servers (optional, not used in this pipeline) |
+| Credentials Binding | Injects secrets safely into shell steps |
 
-Click **Install without restart**, then restart Jenkins.
+Click **Install** then restart Jenkins.
 
 ---
 
-## Step 3 — Add Credentials
+## Step 3 — Add Your DockerHub Credential
 
 Go to **Manage Jenkins → Credentials → System → Global credentials → Add Credential**
 
-### Credential 1 — DockerHub login
-| Field          | Value                         |
-|----------------|-------------------------------|
-| Kind           | Username with password        |
-| Username       | your DockerHub username        |
-| Password       | your DockerHub password/token  |
-| ID             | `dockerhub-credentials`       |
+| Field | Value |
+|---|---|
+| Kind | Username with password |
+| Username | your DockerHub username |
+| Password | your DockerHub password or Access Token |
+| ID | `dockerhub-credentials` ← must match exactly |
 
-> **Tip**: Use a DockerHub **Access Token** instead of your password:
+> **Tip:** Use a DockerHub Access Token instead of your real password:
 > DockerHub → Account Settings → Security → New Access Token
 
-### Credential 2 — Deploy server SSH key
-| Field          | Value                              |
-|----------------|------------------------------------|
-| Kind           | SSH Username with private key      |
-| ID             | `deploy-server-ssh`                |
-| Username       | The SSH user on your deploy server |
-| Private Key    | Paste your private key (PEM format)|
-
-If you don't have an SSH key pair yet:
-```bash
-ssh-keygen -t ed25519 -C "jenkins-deploy"
-# Copy public key to your deploy server:
-ssh-copy-id -i ~/.ssh/id_ed25519.pub user@your-server-ip
-```
-
 ---
 
-## Step 4 — Prepare Your Deploy Server
+## Step 4 — Update the Jenkinsfile
 
-SSH into your deploy server and run:
-
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-
-# Install Docker Compose plugin
-sudo apt install -y docker-compose-plugin
-
-# Create the app directory
-sudo mkdir -p /opt/docker-demo/database
-sudo chown -R $USER:$USER /opt/docker-demo
-```
-
----
-
-## Step 5 — Update the Jenkinsfile
-
-Open `Jenkinsfile` and set these two values:
+Open `Jenkinsfile` and change **one line**:
 
 ```groovy
-DOCKERHUB_USER = 'your-dockerhub-username'   // ← your DockerHub username
-DEPLOY_SERVER  = 'user@your-server-ip'        // ← SSH target (user@host)
-DEPLOY_DIR     = '/opt/docker-demo'           // ← directory on the server
+DOCKERHUB_USER = 'your-dockerhub-username'   // ← put your actual username here
 ```
 
-Also update `docker-compose.prod.yml`:
-```yaml
-image: your-dockerhub-username/demo-backend:latest
-image: your-dockerhub-username/demo-frontend:latest
-DB_HOST: YOUR_RDS_ENDPOINT
-DB_PASSWORD: YOUR_RDS_PASSWORD
-```
+That's it. The image names (`demo-backend`, `demo-frontend`) and everything else
+are built from that one variable.
 
 ---
 
-## Step 6 — Create the Jenkins Pipeline Job
+## Step 5 — Create the Pipeline Job in Jenkins
 
 1. Click **New Item**
-2. Enter a name (e.g., `docker-demo`)
-3. Select **Pipeline** → click **OK**
-4. Scroll to **Pipeline** section:
+2. Name it (e.g. `docker-demo`) → select **Pipeline** → click **OK**
+3. Scroll to the **Pipeline** section at the bottom:
    - Definition: **Pipeline script from SCM**
    - SCM: **Git**
-   - Repository URL: your repo URL (e.g., `https://github.com/you/docker-demo.git`)
-   - Branch: `*/main` (or `*/master`)
+   - Repository URL: your repo URL
+   - Branch Specifier: `*/main`  (or `*/master`)
    - Script Path: `Jenkinsfile`
-5. Click **Save**
+4. Click **Save**
 
 ---
 
-## Step 7 — Add a Webhook (Auto-trigger on Push)
+## Step 6 — Run It
 
-### GitHub
-1. Go to your repo → **Settings → Webhooks → Add webhook**
-2. Payload URL: `http://YOUR_JENKINS_URL:8888/github-webhook/`
-3. Content type: `application/json`
-4. Events: **Just the push event**
-5. Click **Add webhook**
+Click **Build Now** on the job page.
 
-In Jenkins, under the job → **Configure → Build Triggers**, check:
-**GitHub hook trigger for GITScm polling**
+Watch the **Stage View** — each box turns green on success, red on failure.
+Click any stage box to see its console output.
 
-### GitLab / Bitbucket
-Similar — use the Jenkins URL with `/gitlab-webhook/plugin` or the Bitbucket plugin.
+On success your images will be on DockerHub:
+
+```
+hub.docker.com/r/<your-username>/demo-backend
+hub.docker.com/r/<your-username>/demo-frontend
+```
 
 ---
 
-## Step 8 — Run the Pipeline
+## Step 7 (Optional) — Auto-trigger on Git Push
 
-Click **Build Now** on your pipeline job. Watch the stages execute in the **Stage View**.
+### GitHub webhook
 
-On success, your app is live at `http://your-server-ip`.
+1. In your GitHub repo: **Settings → Webhooks → Add webhook**
+   - Payload URL: `http://<your-jenkins-host>:8888/github-webhook/`
+   - Content type: `application/json`
+   - Events: **Just the push event**
+2. In the Jenkins job: **Configure → Build Triggers** → tick **GitHub hook trigger for GITScm polling**
+
+Now every `git push` to `main` automatically kicks off the pipeline.
 
 ---
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Symptom | Fix |
 |---|---|
-| `docker: command not found` on Jenkins agent | Install Docker on the agent; add Jenkins user to `docker` group: `sudo usermod -aG docker jenkins` |
-| `Permission denied` pushing to DockerHub | Check the `dockerhub-credentials` ID matches exactly in Jenkinsfile |
-| SSH deploy step fails | Verify the public key is in `~/.ssh/authorized_keys` on the deploy server |
-| Backend can't reach RDS | Check RDS security group allows port 3306 from the server's IP |
-| `pyflakes` not found | The test stage installs it on the fly; ensure `pip` is available on the agent |
-
----
-
-## Pipeline Summary (one-pager)
-
-```
-Repo push
-    │
-    ▼
-Jenkins picks up change (webhook)
-    │
-    ├─[Test]──── pyflakes lint on app.py
-    │
-    ├─[Build]─── docker build backend → demo-backend:42 + :latest
-    │            docker build frontend → demo-frontend:42 + :latest
-    │
-    ├─[Push]──── docker push to DockerHub (both images, both tags)
-    │
-    └─[Deploy]── scp docker-compose.prod.yml to server
-                 ssh → docker compose pull + up -d
-                 Old containers replaced, zero manual steps needed
-```
+| `docker: command not found` | Docker isn't installed on the Jenkins agent, or Jenkins user isn't in the `docker` group: `sudo usermod -aG docker jenkins && sudo systemctl restart jenkins` |
+| `unauthorized` on docker push | The credential ID in Jenkins doesn't match `dockerhub-credentials` in the Jenkinsfile |
+| `pyflakes: command not found` | The Test stage installs it with pip — make sure `pip` / Python 3 is on the agent |
+| Stage View not showing | Install the **Pipeline: Stage View** plugin |

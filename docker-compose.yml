@@ -1,60 +1,85 @@
-version: '3.8'
+# =============================================================================
+# docker-compose.yml — Local Development
+#
+# Starts three containers that talk to each other over Docker's internal network:
+#
+#   frontend_app      (Nginx)   — port 80   — serves HTML/CSS/JS + proxies /api
+#   backend_app       (Flask)   — port 8080 — REST API (Python)
+#   backend_database  (MySQL 8) — port 3306 — local database
+#
+# Usage:
+#   docker-compose up --build        # build images from source then start all containers
+#   docker-compose up --build -d     # same but detached (runs in background)
+#   docker-compose down              # stop and remove containers
+#   docker-compose down -v           # also wipe the MySQL data volume (clean slate)
+# =============================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOCAL DEVELOPMENT — uses a local MySQL container instead of RDS.
-# For production / RDS, remove the backend_database service and set the
-# DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD env vars in backend_app
-# to point at your RDS endpoint.
-# ─────────────────────────────────────────────────────────────────────────────
+version: '3.8'
 
 services:
 
+  # ── FRONTEND (Nginx) ─────────────────────────────────────────────────────────
+  # Serves static HTML/CSS/JS AND proxies /api/* requests to the backend,
+  # so the browser never needs to know the backend's host or port.
   frontend_app:
     build:
-      dockerfile: frontend.Dockerfile
-      context: frontend/
+      dockerfile: frontend.Dockerfile   # path to Dockerfile inside the context folder
+      context: frontend/                # Docker packages this folder and sends it to the daemon
     ports:
-      - "80:80"
+      - "80:80"                         # host port : container port → http://localhost
     depends_on:
       backend_app:
-        condition: service_healthy
+        condition: service_healthy      # wait until Flask's /ping healthcheck passes
+                                        # before starting Nginx (prevents 502 on first load)
 
+  # ── BACKEND (Python / Flask) ─────────────────────────────────────────────────
+  # REST API. Reads DB connection info from environment variables so the same
+  # image works locally (MySQL container) and in production (RDS) without code changes.
   backend_app:
     build:
       dockerfile: backend.Dockerfile
       context: backend/
     ports:
-      - "8080:8080"
+      - "8080:8080"                     # also exposed directly so you can curl the API
     environment:
-      DB_HOST:     backend_database
+      # These variable names match the os.environ.get() calls in app.py
+      DB_HOST:     backend_database     # Docker service name = DNS hostname on the internal network
       DB_PORT:     "3306"
       DB_NAME:     backend_db
       DB_USER:     user
       DB_PASSWORD: password
     depends_on:
       backend_database:
-        condition: service_healthy
+        condition: service_healthy      # wait until MySQL is ready before Flask tries to connect
     healthcheck:
+      # curl -f exits non-zero if HTTP status >= 400, which fails the check.
+      # The frontend's depends_on and Jenkins both use this to know Flask is up.
       test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
+      interval: 5s        # re-run the check every 5 seconds
+      timeout: 3s         # treat as failed if no response within 3 seconds
+      retries: 10         # mark unhealthy after 10 consecutive failures
+      start_period: 10s   # give Flask 10 seconds to boot before counting failures
 
+  # ── DATABASE (MySQL 8) ───────────────────────────────────────────────────────
+  # Official MySQL image — no custom Dockerfile needed.
+  # Data is NOT persisted between "docker-compose down -v" runs, which gives a
+  # clean database on every full restart (good for a demo/dev environment).
   backend_database:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE:      backend_db
-      MYSQL_USER:          user
-      MYSQL_PASSWORD:      password
+      MYSQL_ROOT_PASSWORD: rootpassword # root superuser password (used internally)
+      MYSQL_DATABASE:      backend_db   # MySQL creates this database automatically on first run
+      MYSQL_USER:          user         # regular app user (matches DB_USER above)
+      MYSQL_PASSWORD:      password     # app user password (matches DB_PASSWORD above)
     ports:
-      - "3306:3306"
+      - "3306:3306"                     # expose so you can inspect the DB with a GUI client
     volumes:
+      # MySQL automatically runs every *.sql file placed in this container folder
+      # on the very first startup (when the data directory is empty).
       - ./database/1_init_db.sql:/docker-entrypoint-initdb.d/1_init_db.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uuser", "-ppassword"]
       interval: 5s
       timeout: 3s
       retries: 10
-      start_period: 20s
+      start_period: 20s   # MySQL takes longer to initialise than the app containers
